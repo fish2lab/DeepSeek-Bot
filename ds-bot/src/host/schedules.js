@@ -5,9 +5,22 @@
 // them. A group chat's task lives on the group's own Session, so the reminder reaches
 // the group like a message from the user (see reminderText). DSH 0.2.0 mounts the service only with its Automation tasks bundle on, so
 // the service is optional and every endpoint reports whether it is there.
+//
+// DSH has no pause and no run-now (docs/plans/2026-10-19-scheduled-tasks.md): a paused
+// task leaves DSH and waits in state.pausedTasks until it is resumed, and Run now puts
+// the same reminder message DSH would send into the task's chat.
+import { randomUUID } from 'node:crypto'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 
 const MAX_TITLE = 120
+const HISTORY_LIMIT = 20
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/
+const REPEATING = new Set(['every', 'daily', 'weekly', 'cron'])
+const MISSES = {
+  schedule_not_found: 'No such task',
+  schedule_ended: 'This task has already run',
+  schedule_conflict: 'This task changed meanwhile; open it again',
+}
 
 const invalid = message => Object.assign(new Error(message), { code: 'bot/invalid' })
 
@@ -63,13 +76,62 @@ function selectorOf(when) {
       if (!Number.isInteger(minutes) || minutes < 1 || minutes > 7 * 24 * 60) throw invalid('Repeat every 1 minute to 7 days')
       return { every_seconds: minutes * 60 }
     }
+    case 'cron': {
+      const expression = String(when.expression ?? '').trim().replace(/\s+/g, ' ')
+      if (expression.split(' ').length !== 5) throw invalid('Write five fields: minute hour day month weekday')
+      return { cron: { expression, time_zone: zone } }
+    }
     default:
       throw invalid('Pick when it runs')
   }
 }
 
+// The same timing as an update's change.
+function changeOf(selector) {
+  const [kind] = Object.keys(selector)
+  return kind === 'every_seconds' ? { kind: 'every', every_seconds: selector.every_seconds } : { kind, [kind]: selector[kind] }
+}
+
+// The stored fields of a paused task for the given timing, as a record shows them.
+function timingFields(selector) {
+  if (selector.every_seconds !== undefined) return { kind: 'every', everySeconds: selector.every_seconds }
+  if (selector.daily) return { kind: 'daily', time: selector.daily.time, timeZone: selector.daily.time_zone }
+  if (selector.weekly) return { kind: 'weekly', time: selector.weekly.time, timeZone: selector.weekly.time_zone, weekdays: selector.weekly.weekdays }
+  if (selector.cron) return { kind: 'cron', expression: selector.cron.expression, timeZone: selector.cron.time_zone }
+  throw invalid('A paused task repeats; pick a repeating time')
+}
+
+// A catalog entry without the fields DSH adds around the stored record.
+function recordOf(entry) {
+  const { sessionId: _session, status: _status, lastDelivery: _last, ...record } = entry
+  return record
+}
+
+function checkedTitle(value) {
+  const title = String(value ?? '').trim()
+  if (title === '') throw invalid('Give the task a name')
+  if (title.length > MAX_TITLE) throw invalid(`Keep the name under ${MAX_TITLE} characters`)
+  return title
+}
+function checkedPrompt(value) {
+  const prompt = String(value ?? '').trim()
+  if (prompt === '') throw invalid('Say what the Bot should do')
+  return prompt
+}
+
+// DSH's one-shot reminder framing, which turns.js and the chat already read as a due task.
+function reminderMessage(id, prompt) {
+  return [
+    '[SCHEDULE REMINDER]',
+    'This is a scheduled message from the user',
+    `schedule_id_json: ${JSON.stringify(id)}`,
+    `occurrence_at: ${new Date().toISOString()}`,
+    `reminder_prompt_json: ${JSON.stringify(prompt)}`,
+  ].join('\n')
+}
+
 export function install(rt) {
-  const { ctx } = rt
+  const { ctx, state } = rt
   let service = null
 
   const attach = (sub) => {
@@ -90,6 +152,10 @@ export function install(rt) {
   }
   const known = owner => owner !== undefined && (owner.botId === undefined ? rt.roomOf(owner.roomId) !== undefined : rt.botOf(owner.botId) !== undefined)
 
+  // The Session a task of this Bot or group chat goes to now.
+  const sessionFor = owner => (owner.botId === undefined ? owner.roomId : rt.chatOf(owner.botId))
+  const paused = () => state.pausedTasks ?? {}
+
   async function schedulesView() {
     if (service === null) return { available: false, tasks: [] }
     const tasks = []
@@ -98,26 +164,135 @@ export function install(rt) {
       if (!known(owner)) continue
       tasks.push({ ...entry, ...owner })
     }
+    // A paused task of a removed Bot or group chat goes with it.
+    let pruned = false
+    for (const [id, task] of Object.entries(paused())) {
+      const owner = task.botId === undefined ? { roomId: task.roomId } : { botId: task.botId }
+      if (!known(owner)) { delete state.pausedTasks[id]; pruned = true; continue }
+      tasks.push({ ...task.record, id, title: task.title, prompt: task.prompt, status: 'paused', pausedAt: task.pausedAt, ...owner })
+    }
+    if (pruned) await rt.save()
     return { available: true, tasks }
+  }
+
+  const needService = () => {
+    if (service === null) throw invalid('Automation tasks are off in DSH')
+  }
+  // The active or finished DSH task the request names, with its Bot or group chat.
+  async function findTask(body) {
+    const owner = ownerOf(body.sessionId)
+    const entry = owner === undefined ? undefined : (await service.catalog()).find(item => item.sessionId === body.sessionId && item.id === body.id)
+    if (entry === undefined) throw invalid('No such task')
+    return { entry, owner }
+  }
+  const findPaused = (id) => {
+    const task = typeof id === 'string' && Object.hasOwn(paused(), id) ? paused()[id] : undefined
+    if (task === undefined) throw invalid('No such task')
+    return task
   }
 
   const endpoints = {
     schedules: () => schedulesView(),
     async 'schedule-create'(body) {
-      if (service === null) throw invalid('Automation tasks are off in DSH')
+      needService()
       const bot = rt.botOf(body.target)
       const room = rt.roomOf(body.target)
       if (bot === undefined && room === undefined) throw invalid('No such Bot or group chat')
-      const title = String(body.title ?? '').trim()
-      const prompt = String(body.prompt ?? '').trim()
-      if (title === '') throw invalid('Give the task a name')
-      if (title.length > MAX_TITLE) throw invalid(`Keep the name under ${MAX_TITLE} characters`)
-      if (prompt === '') throw invalid('Say what the Bot should do')
+      const title = checkedTitle(body.title)
+      const prompt = checkedPrompt(body.prompt)
       await service.create(bot ? rt.chatOf(bot.id) : room.id, { title, prompt, ...selectorOf(body.when) })
       return schedulesView()
     },
+    async 'schedule-update'(body) {
+      needService()
+      const content = {
+        ...(body.title === undefined ? {} : { title: checkedTitle(body.title) }),
+        ...(body.prompt === undefined ? {} : { prompt: checkedPrompt(body.prompt) }),
+      }
+      const selector = body.when === undefined ? undefined : selectorOf(body.when)
+      if (body.paused === true) {
+        const task = findPaused(body.id)
+        Object.assign(task, content)
+        if (selector !== undefined) task.record = timingFields(selector)
+        await rt.save()
+        return schedulesView()
+      }
+      const { entry } = await findTask(body)
+      const result = await service.update({
+        sessionId: body.sessionId, id: body.id, expected: recordOf(entry), ...content,
+        ...(selector === undefined ? {} : { change: changeOf(selector) }),
+      })
+      if (result.code !== undefined) throw invalid(MISSES[result.code] ?? result.message ?? 'The task was not changed')
+      return schedulesView()
+    },
+    async 'schedule-history'(body) {
+      needService()
+      await findTask(body)
+      const result = await service.history({ sessionId: body.sessionId, id: body.id, limit: HISTORY_LIMIT })
+      if (result.code !== undefined) throw invalid(MISSES[result.code] ?? 'No such task')
+      return { runs: result.records.map(({ scheduledAt, deliveredAt }) => ({ scheduledAt, deliveredAt })), earlierUnavailable: result.earlierRecordsUnavailable }
+    },
+    async 'schedule-pause'(body) {
+      needService()
+      const { entry, owner } = await findTask(body)
+      if (entry.status !== 'active') throw invalid('This task has already run')
+      if (!REPEATING.has(entry.kind)) throw invalid('Only repeating tasks can be paused')
+      const { id: _id, scheduledAt: _at, title, prompt, ...record } = recordOf(entry)
+      state.pausedTasks ??= {}
+      const id = `paused-${randomUUID()}`
+      // Saved before DSH forgets it, so a failure in between leaves a copy, not nothing.
+      state.pausedTasks[id] = { ...owner, title, prompt, record, pausedAt: new Date().toISOString() }
+      await rt.save()
+      try {
+        await service.delete({ sessionId: body.sessionId, id: body.id })
+      } catch (error) {
+        delete state.pausedTasks[id]
+        await rt.save()
+        throw error
+      }
+      return schedulesView()
+    },
+    async 'schedule-resume'(body) {
+      needService()
+      const task = findPaused(body.id)
+      const owner = task.botId === undefined ? { roomId: task.roomId } : { botId: task.botId }
+      if (!known(owner)) throw invalid('No such Bot or group chat')
+      const request = requestOf({ ...task.record, title: task.title, prompt: task.prompt })
+      if (request === null) throw invalid('No such task')
+      await service.create(sessionFor(owner), request)
+      delete state.pausedTasks[body.id]
+      await rt.save()
+      return schedulesView()
+    },
+    async 'schedule-run'(body) {
+      needService()
+      let owner
+      let prompt
+      if (body.paused === true) {
+        const task = findPaused(body.id)
+        owner = task.botId === undefined ? { roomId: task.roomId } : { botId: task.botId }
+        prompt = task.prompt
+      } else {
+        const found = await findTask(body)
+        owner = found.owner
+        prompt = found.entry.prompt
+      }
+      if (!known(owner)) throw invalid('No such Bot or group chat')
+      const sessionId = sessionFor(owner)
+      await rt.ensureCapabilities(sessionId)
+      const agent = await rt.resolveAgent(sessionId)
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: reminderMessage(body.id, prompt) }], source: { kind: 'schedule' } }))
+      await ctx.sessions.flush(agent.session)
+      return true
+    },
     async 'schedule-delete'(body) {
-      if (service === null) throw invalid('Automation tasks are off in DSH')
+      if (body.paused === true) {
+        findPaused(body.id)
+        delete state.pausedTasks[body.id]
+        await rt.save()
+        return schedulesView()
+      }
+      needService()
       if (ownerOf(body.sessionId) === undefined) throw invalid('No such task')
       await service.delete({ sessionId: body.sessionId, id: body.id })
       return schedulesView()

@@ -41,6 +41,20 @@ function scheduleService() {
       tasks.delete(id)
       return { id, deleted: true }
     },
+    // Compare-and-set on the whole record, as DSH does.
+    async update({ sessionId, id, expected, title, prompt, change }) {
+      const task = tasks.get(id)
+      if (task?.sessionId !== sessionId) return { id, updated: false, code: 'schedule_not_found' }
+      if (JSON.stringify(expected) !== JSON.stringify(task.record)) return { id, updated: false, code: 'schedule_conflict' }
+      const timing = change === undefined ? {} : { kind: change.kind, timing: change[change.kind === 'every' ? 'every_seconds' : change.kind] }
+      task.record = { ...task.record, ...(title === undefined ? {} : { title }), ...(prompt === undefined ? {} : { prompt }), ...timing }
+      return { id, updated: true, record: task.record }
+    },
+    async history({ sessionId, id, limit }) {
+      if (tasks.get(id)?.sessionId !== sessionId) return { id, code: 'schedule_not_found' }
+      const runs = [{ scheduledAt: '2030-01-01T01:00:00.000Z', deliveredAt: '2030-01-01T01:00:02.000Z', messageId: 'm1', prompt: 'x' }]
+      return { id, records: runs.slice(0, limit), earlierRecordsUnavailable: false, earlierRecordsPruned: false, retention: { days: 30, records: 200 } }
+    },
   }
 }
 
@@ -112,6 +126,99 @@ test('a group chat task lives on the group Session and lists under the group', a
   assert.equal([...schedule.tasks.values()][0].sessionId, 'g1')
   assert.deepEqual(made.value.tasks.map(task => [task.title, task.roomId, task.botId]), [['Standup', 'g1', undefined]])
   assert.match((await call('schedule-create', { target: 'nobody', title: 'x', prompt: 'y', when: { kind: 'every', minutes: 5 } })).error.message, /No such Bot or group chat/)
+})
+
+test('a task is edited against the record it was read from', async (t) => {
+  const schedule = scheduleService()
+  const { ctx, home, call } = setup({ schedule })
+  t.after(async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true, maxRetries: 5 }) })
+  await call('schedule-create', { target: 'm1', title: 'Briefing', prompt: 'Sum up', when: { kind: 'daily', time: '09:00', timeZone: 'UTC' } })
+  const [{ record }] = [...schedule.tasks.values()]
+  const edited = await call('schedule-update', { sessionId: 'm1', id: record.id, title: 'Evening', when: { kind: 'cron', expression: ' 0  18 * * 1-5 ', timeZone: 'UTC' } })
+  assert.equal(edited.ok, true, JSON.stringify(edited))
+  const after = schedule.tasks.get(record.id).record
+  assert.deepEqual([after.title, after.prompt, after.kind, after.timing], ['Evening', 'Sum up', 'cron', { expression: '0 18 * * 1-5', time_zone: 'UTC' }])
+
+  // Another write in between (a delivery, an edit elsewhere) makes DSH refuse.
+  schedule.tasks.get(record.id).record = { ...after, scheduledAt: '2030-01-02T18:00:00.000Z' }
+  const stale = schedule.update
+  schedule.update = request => stale({ ...request, expected: after })
+  assert.match((await call('schedule-update', { sessionId: 'm1', id: record.id, prompt: 'New' })).error.message, /changed meanwhile/)
+  schedule.update = stale
+  assert.match((await call('schedule-update', { sessionId: 'm1', id: record.id, title: ' ' })).error.message, /name/)
+  assert.match((await call('schedule-update', { sessionId: 'm1', id: record.id, when: { kind: 'cron', expression: '0 18 * *' } })).error.message, /five fields/)
+  assert.match((await call('schedule-update', { sessionId: 'outside', id: record.id, title: 'x' })).error.message, /No such task/)
+
+  const history = await call('schedule-history', { sessionId: 'm1', id: record.id })
+  assert.deepEqual(history.value.runs, [{ scheduledAt: '2030-01-01T01:00:00.000Z', deliveredAt: '2030-01-01T01:00:02.000Z' }])
+})
+
+test('a paused task leaves DSH, keeps its timing, and comes back on the Bot’s current part', async (t) => {
+  const schedule = scheduleService()
+  const { ctx, home, call } = setup({ schedule })
+  t.after(async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true, maxRetries: 5 }) })
+  await schedule.create('w1', { title: 'Old part', prompt: 'Check', weekly: { time: '09:00:00', time_zone: 'UTC', weekdays: [1, 3] } })
+  const [[id, { record }]] = [...schedule.tasks.entries()]
+  Object.assign(record, { kind: 'weekly', time: '09:00:00', timeZone: 'UTC', weekdays: [1, 3] })
+  await schedule.create('m1', { title: 'Once', prompt: 'x', at: '2030-01-01T00:00:00Z' })
+  const once = [...schedule.tasks.values()].at(-1).record
+
+  assert.match((await call('schedule-pause', { sessionId: 'm1', id: once.id })).error.message, /Only repeating/)
+  const pausedView = (await call('schedule-pause', { sessionId: 'w1', id })).value
+  assert.equal(schedule.tasks.has(id), false)
+  const pausedTask = pausedView.tasks.find(task => task.status === 'paused')
+  assert.deepEqual([pausedTask.title, pausedTask.botId, pausedTask.kind, pausedTask.weekdays], ['Old part', 'w1', 'weekly', [1, 3]])
+
+  const renamed = await call('schedule-update', { paused: true, id: pausedTask.id, prompt: 'Check twice', when: { kind: 'daily', time: '07:30', timeZone: 'UTC' } })
+  assert.equal(renamed.ok, true, JSON.stringify(renamed))
+
+  const resumed = (await call('schedule-resume', { id: pausedTask.id })).value
+  assert.equal(resumed.tasks.some(task => task.status === 'paused'), false)
+  const back = [...schedule.tasks.values()].at(-1)
+  assert.equal(back.sessionId, 'w2')
+  assert.deepEqual([back.record.title, back.record.prompt, back.record.kind, back.record.timing], ['Old part', 'Check twice', 'daily', { time: '07:30:00', time_zone: 'UTC' }])
+  assert.match((await call('schedule-resume', { id: pausedTask.id })).error.message, /No such task/)
+})
+
+test('a paused task can be deleted and goes when its Bot does', async (t) => {
+  const schedule = scheduleService()
+  const { ctx, home, call } = setup({ schedule })
+  t.after(async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true, maxRetries: 5 }) })
+  for (const target of ['m1', 'g1']) await call('schedule-create', { target, title: `Ping ${target}`, prompt: 'x', when: { kind: 'every', minutes: 60 } })
+  // A copy: pausing removes each task from the map.
+  const made = [...schedule.tasks.entries()]
+  for (const [id, task] of made) {
+    Object.assign(task.record, { kind: 'every', everySeconds: 3600 })
+    await call('schedule-pause', { sessionId: task.sessionId, id })
+  }
+  const [first, second] = (await call('schedules', {})).value.tasks
+  assert.deepEqual([first.roomId, second.roomId], [undefined, 'g1'])
+  const left = (await call('schedule-delete', { paused: true, id: first.id })).value.tasks
+  assert.deepEqual(left.map(task => task.title), ['Ping g1'])
+
+  Object.assign(ctx, { workspaceRegistry: { archiveSession: async () => {} } })
+  assert.equal((await call('delete-room', { id: 'g1' })).ok, true)
+  assert.deepEqual((await call('schedules', {})).value.tasks, [])
+})
+
+test('Run now sends the reminder DSH would send to the task’s chat', async (t) => {
+  const schedule = scheduleService()
+  const { ctx, home, call } = setup({ schedule })
+  t.after(async () => { await ctx.dispose(); rmSync(home, { recursive: true, force: true, maxRetries: 5 }) })
+  const sent = []
+  Object.assign(ctx, {
+    sessionController: { resolveAgent: async id => ({ agent: { id, session: { id }, ctx: { tools: { restrict: () => () => {} }, effect: execute => execute() }, followup: message => sent.push({ id, message }) } }) },
+    sessions: { flush: async () => true },
+  })
+  await schedule.create('w1', { title: 'Old part', prompt: 'Where are we?', every_seconds: 3600 })
+  const [[id]] = [...schedule.tasks.entries()]
+  const ran = await call('schedule-run', { sessionId: 'w1', id })
+  assert.equal(ran.ok, true, JSON.stringify(ran))
+  assert.equal(sent.length, 1)
+  assert.equal(sent[0].id, 'w2')
+  assert.equal(sent[0].message.source.kind, 'schedule')
+  assert.equal(reminderText(sent[0].message.content[0].text), '[Scheduled task] Where are we?')
+  assert.equal(schedule.tasks.has(id), true)
 })
 
 test('a due reminder reaches a group as its prompts', () => {
