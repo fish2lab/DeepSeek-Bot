@@ -320,7 +320,7 @@ export const SCHEDULE_CSS = `
 .bt-task-icon svg{width:14px;height:14px}
 .bt-task-runs{margin:0;padding-left:18px;font-size:12px;line-height:18px;color:var(--bt-ink-2);font-variant-numeric:tabular-nums}
 .bt-task-edit{display:block}
-.bt-task-cron{min-width:160px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.bt-task-when .bt-task-cron{width:24ch;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .bt-task-remove[data-confirm]{background:color-mix(in srgb,var(--bt-danger) 10%,transparent);color:var(--bt-danger)}
 .bt-task-head{display:flex;align-items:center;gap:6px}
 .bt-task-form{animation:bt-q-in .4s cubic-bezier(.22,1,.36,1),bt-veil-in .2s ease-out}
