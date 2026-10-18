@@ -3,7 +3,7 @@
 // sends its prompt to the Bot's chat when it is due.
 import { createElement as h, Fragment, useEffect, useState } from 'react'
 import { BotAvatar, RoomAvatar } from './mark.js'
-import { ClockIcon, PlusIcon, TrashIcon } from './icons.js'
+import { ClockIcon, PencilIcon, PlusIcon, TrashIcon } from './icons.js'
 import { Segmented } from './motion.js'
 import { dateLocale, hostText, t } from './i18n.js'
 
@@ -69,61 +69,136 @@ export function timingText(task) {
     default: return ''
   }
 }
-const nextText = task => (task.status === 'active' ? t('Next: {time}', { time: dayAndTime(Date.parse(task.scheduledAt)) }) : t('Finished'))
+const REPEATING = ['every', 'daily', 'weekly', 'cron']
+function nextText(task) {
+  if (task.status === 'paused') return t('Paused')
+  return task.status === 'active' ? t('Next: {time}', { time: dayAndTime(Date.parse(task.scheduledAt)) }) : t('Finished')
+}
+const lastRunText = task => (task.lastDelivery ? t('Last run {time}', { time: dayAndTime(Date.parse(task.lastDelivery.deliveredAt)) }) : '')
+
+// The runs DSH saved for a task, newest first: when each reminder reached the chat.
+function TaskRuns({ task, actions }) {
+  const [view, setView] = useState(null)
+  useEffect(() => {
+    let stopped = false
+    actions.scheduleHistory(task).then(
+      (next) => { if (!stopped) setView(next) },
+      () => { if (!stopped) setView({ runs: [], failed: true }) })
+    return () => { stopped = true }
+  }, [task.id, task.lastDelivery?.deliveredAt])
+  if (view === null) return h('span', { className: 'bt-set-hint' }, t('Loading…'))
+  if (view.runs.length === 0) return h('span', { className: 'bt-set-hint' }, view.failed ? t("Couldn't load the runs") : t('No runs yet'))
+  return h('ol', { className: 'bt-task-runs', 'aria-label': t('Runs') }, view.runs.map(run => h('li', { key: run.deliveredAt }, dayAndTime(Date.parse(run.deliveredAt)))))
+}
 
 function TaskRow({ task, actions, onView, showBot, roster }) {
   const [confirming, setConfirming] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [runs, setRuns] = useState(false)
+  const [note, setNote] = useState(null)
   useEffect(() => {
     if (!confirming) return undefined
     const timer = setTimeout(() => setConfirming(false), 3000)
     return () => clearTimeout(timer)
   }, [confirming])
+  const act = (work, done = onView) => {
+    if (busy) return
+    setBusy(true)
+    setNote(null)
+    void work().then(
+      (value) => { setBusy(false); done(value) },
+      (failure) => { setBusy(false); setNote({ error: true, text: hostText(failure?.message ?? String(failure)) }) })
+  }
   const remove = () => {
     if (!confirming) { setConfirming(true); return }
-    setBusy(true)
-    void actions.scheduleDelete(task.sessionId, task.id).then(onView, () => setBusy(false))
+    act(() => actions.scheduleDelete(task))
   }
+  if (editing) {
+    return h('div', { className: 'bt-set-row bt-task-edit' }, h(TaskForm, {
+      roster, actions, task, onCancel: () => setEditing(false), onDone: (next) => { setEditing(false); onView(next) },
+    }))
+  }
+  const live = task.status !== 'inactive'
+  const paused = task.status === 'paused'
   const room = task.roomId ? roster.roomsById[task.roomId] : undefined
-  return h('div', { className: 'bt-set-row bt-task', 'data-done': task.status === 'active' ? undefined : '', 'data-busy': busy || undefined },
-    showBot ? h(BotAvatar, { bot: roster.byId[task.botId], size: 28, badge: false, live: false }) : null,
-    h('span', { className: 'bt-set-copy' },
-      h('span', { className: 'bt-task-title' }, task.title),
-      h('span', { className: 'bt-set-hint' }, [timingText(task), room ? t('in {name}', { name: room.name }) : ''].filter(Boolean).join(' · ')),
-      task.prompt && task.prompt !== task.title ? h('span', { className: 'bt-task-prompt' }, task.prompt) : null),
-    h('span', { className: 'bt-task-next' }, nextText(task)),
-    h('button', {
-      type: 'button', className: 'bt-mini bt-task-remove', 'data-confirm': confirming || undefined, disabled: busy,
-      'aria-label': confirming ? t('Click again to delete') : t('Delete task'), title: confirming ? undefined : t('Delete task'), onClick: remove,
-    }, confirming ? t('Delete') : h(TrashIcon)))
+  const hint = [timingText(task), room ? t('in {name}', { name: room.name }) : '', lastRunText(task)].filter(Boolean).join(' · ')
+  return h(Fragment, null,
+    h('div', { className: 'bt-set-row bt-task', 'data-done': task.status === 'active' ? undefined : '', 'data-busy': busy || undefined },
+      showBot ? h(BotAvatar, { bot: roster.byId[task.botId], size: 28, badge: false, live: false }) : null,
+      h('span', { className: 'bt-set-copy' },
+        h('span', { className: 'bt-task-title' }, task.title),
+        h('span', { className: 'bt-set-hint' }, hint),
+        task.prompt && task.prompt !== task.title ? h('span', { className: 'bt-task-prompt' }, task.prompt) : null,
+        note ? h('span', { className: note.error ? 'bt-set-hint bt-danger' : 'bt-set-hint', role: 'status' }, note.text) : null),
+      h('span', { className: 'bt-task-next' }, nextText(task)),
+      h('span', { className: 'bt-task-tools' },
+        live ? h('button', {
+          type: 'button', className: 'bt-mini', disabled: busy,
+          onClick: () => act(() => actions.scheduleRun(task), () => setNote({ text: t('Sent to the chat') })),
+        }, t('Run now')) : null,
+        live && REPEATING.includes(task.kind) ? h('button', {
+          type: 'button', className: 'bt-mini', disabled: busy,
+          onClick: () => act(() => (paused ? actions.scheduleResume(task) : actions.schedulePause(task))),
+        }, paused ? t('Resume') : t('Pause')) : null,
+        task.lastDelivery ? h('button', { type: 'button', className: 'bt-mini', 'aria-expanded': runs, onClick: () => setRuns(open => !open) }, t('Runs')) : null,
+        live ? h('button', {
+          type: 'button', className: 'bt-mini bt-task-icon', disabled: busy, 'aria-label': t('Edit task'), title: t('Edit task'), onClick: () => setEditing(true),
+        }, h(PencilIcon)) : null,
+        h('button', {
+          type: 'button', className: 'bt-mini bt-task-icon bt-task-remove', 'data-confirm': confirming || undefined, disabled: busy,
+          'aria-label': confirming ? t('Click again to delete') : t('Delete task'), title: confirming ? undefined : t('Delete task'), onClick: remove,
+        }, confirming ? t('Delete') : h(TrashIcon)))),
+    runs ? h('div', { className: 'bt-set-row bt-task-runs-row' }, h(TaskRuns, { task, actions })) : null)
 }
 
 const pad = number => String(number).padStart(2, '0')
+const localInput = date => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
 function inAnHour() {
   const date = new Date(Date.now() + 3600_000)
   date.setMinutes(0, 0, 0)
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:00`
+  return localInput(date)
 }
-const KINDS = [['at', 'Once'], ['daily', 'Every day'], ['weekly', 'Every week'], ['every', 'Repeat']]
+const KINDS = [['at', 'Once'], ['daily', 'Every day'], ['weekly', 'Every week'], ['every', 'Repeat'], ['cron', 'Custom']]
 const UNITS = [['minutes', 1, 'minutes'], ['hours', 60, 'hours'], ['days', 1440, 'days']]
 
-function TaskForm({ roster, actions, start, onDone, onCancel }) {
+// The form's fields for a new task, or for the task being edited.
+function formStart(task) {
+  const start = { kind: 'daily', at: inAnHour(), time: '09:00', weekdays: [1, 2, 3, 4, 5], count: 1, unit: 'hours', expression: '0 9 * * 1-5' }
+  if (task === undefined) return start
+  Object.assign(start, { kind: task.kind === 'after' ? 'at' : task.kind, time: clock(task.time) || start.time, weekdays: task.weekdays ?? start.weekdays, expression: task.expression ?? start.expression })
+  if (start.kind === 'at') start.at = localInput(new Date(Date.parse(task.scheduledAt)))
+  if (task.kind === 'every') {
+    const [unit, minutes] = [...UNITS].reverse().find(([, size]) => task.everySeconds % (size * 60) === 0) ?? UNITS[0]
+    Object.assign(start, { unit, count: task.everySeconds / (minutes * 60) })
+  }
+  return start
+}
+
+function TaskForm({ roster, actions, start, task, onDone, onCancel }) {
   // A task goes to a Bot's chat or to a group chat, where it reads as your message.
-  const [target, setTarget] = useState(start ?? roster.bots[0]?.id ?? '')
-  const [title, setTitle] = useState('')
-  const [prompt, setPrompt] = useState('')
-  const [kind, setKind] = useState('daily')
-  const [at, setAt] = useState(inAnHour)
-  const [time, setTime] = useState('09:00')
-  const [weekdays, setWeekdays] = useState([1, 2, 3, 4, 5])
-  const [count, setCount] = useState(1)
-  const [unit, setUnit] = useState('hours')
+  // An edited task stays where it is: DSH binds a task to its chat.
+  const [target, setTarget] = useState(task ? (task.roomId ?? task.botId) : start ?? roster.bots[0]?.id ?? '')
+  const [title, setTitle] = useState(task?.title ?? '')
+  const [prompt, setPrompt] = useState(task?.prompt ?? '')
+  const begin = formStart(task)
+  const [kind, setKind] = useState(begin.kind)
+  const [at, setAt] = useState(begin.at)
+  const [time, setTime] = useState(begin.time)
+  const [weekdays, setWeekdays] = useState(begin.weekdays)
+  const [count, setCount] = useState(begin.count)
+  const [unit, setUnit] = useState(begin.unit)
+  const [expression, setExpression] = useState(begin.expression)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  // A paused task comes back as it was, so it keeps repeating.
+  const kinds = task?.status === 'paused' ? KINDS.filter(([id]) => id !== 'at') : KINDS
+  const zone = task?.timeZone ?? localZone()
   const timing = () => {
     if (kind === 'at') return { kind, at: new Date(at).toISOString() }
     if (kind === 'every') return { kind, minutes: Math.round(Number(count) * UNITS.find(([id]) => id === unit)[1]) }
-    return { kind, time, timeZone: localZone(), ...(kind === 'weekly' ? { weekdays } : {}) }
+    if (kind === 'cron') return { kind, expression, timeZone: zone }
+    return { kind, time, timeZone: zone, ...(kind === 'weekly' ? { weekdays } : {}) }
   }
   const submit = (event) => {
     event.preventDefault()
@@ -132,14 +207,14 @@ function TaskForm({ roster, actions, start, onDone, onCancel }) {
     setError('')
     let when
     try { when = timing() } catch { setError(t('Pick a date and time')); setBusy(false); return }
-    void actions.scheduleCreate({ target, title, prompt, when })
-      .then(onDone, (failure) => { setError(hostText(failure?.message ?? String(failure))); setBusy(false) })
+    const saving = task ? actions.scheduleUpdate(task, { title, prompt, when }) : actions.scheduleCreate({ target, title, prompt, when })
+    void saving.then(onDone, (failure) => { setError(hostText(failure?.message ?? String(failure))); setBusy(false) })
   }
   const toggleDay = day => setWeekdays(days => (days.includes(day) ? days.filter(item => item !== day) : [...days, day].sort()))
-  return h('form', { className: 'bt-set-card bt-task-form', onSubmit: submit },
+  return h('form', { className: task ? 'bt-task-form' : 'bt-set-card bt-task-form', onSubmit: submit },
     h('label', { className: 'bt-set-row bt-bs-row' },
       h('span', { className: 'bt-set-copy' }, h('span', { className: 'bt-bs-label' }, t('Send to'))),
-      h('select', { className: 'bt-select bt-task-bot', value: target, onChange: event => setTarget(event.target.value) },
+      h('select', { className: 'bt-select bt-task-bot', value: target, disabled: task !== undefined, onChange: event => setTarget(event.target.value) },
         h('optgroup', { label: t('Bots') }, roster.bots.map(bot => h('option', { key: bot.id, value: bot.id }, bot.name))),
         roster.rooms.length > 0 ? h('optgroup', { label: t('Group chats') }, roster.rooms.map(room => h('option', { key: room.id, value: room.id }, room.name))) : null)),
     h('label', { className: 'bt-set-row bt-bs-row' },
@@ -150,7 +225,7 @@ function TaskForm({ roster, actions, start, onDone, onCancel }) {
       h('textarea', { className: 'bt-bs-input bt-bs-area', value: prompt, rows: 3, placeholder: t('Sum up what changed since yesterday and what needs me today.'), onChange: event => setPrompt(event.target.value) })),
     h('div', { className: 'bt-set-row bt-bs-row bt-bs-stack' },
       h('span', { className: 'bt-set-copy' }, h('span', { className: 'bt-bs-label' }, t('When'))),
-      h(Segmented, { label: t('When'), value: kind }, KINDS.map(([id, label]) => h('button', { key: id, type: 'button', 'aria-pressed': kind === id, onClick: () => setKind(id) }, t(label)))),
+      h(Segmented, { label: t('When'), value: kind }, kinds.map(([id, label]) => h('button', { key: id, type: 'button', 'aria-pressed': kind === id, onClick: () => setKind(id) }, t(label)))),
       h('div', { key: kind, className: 'bt-task-when bt-veil' },
         kind === 'at' ? h('input', { className: 'bt-input', type: 'datetime-local', value: at, 'aria-label': t('Date and time'), onChange: event => setAt(event.target.value) }) : null,
         kind === 'weekly' ? h('div', { className: 'bt-task-days', role: 'group', 'aria-label': t('Days') }, [1, 2, 3, 4, 5, 6, 7].map(day => h('button', {
@@ -161,11 +236,15 @@ function TaskForm({ roster, actions, start, onDone, onCancel }) {
           h('span', { className: 'bt-task-every' }, t('Every')),
           h('input', { className: 'bt-input bt-task-count', type: 'number', min: 1, value: count, 'aria-label': t('How many'), onChange: event => setCount(event.target.value) }),
           h('select', { className: 'bt-select bt-task-unit', value: unit, 'aria-label': t('Unit'), onChange: event => setUnit(event.target.value) },
-            UNITS.map(([id, , label]) => h('option', { key: id, value: id }, t(label))))) : null)),
+            UNITS.map(([id, , label]) => h('option', { key: id, value: id }, t(label))))) : null,
+        kind === 'cron' ? h(Fragment, null,
+          h('input', { className: 'bt-input bt-task-cron', value: expression, spellCheck: false, 'aria-label': t('Cron expression'), placeholder: '0 9 * * 1-5', onChange: event => setExpression(event.target.value) }),
+          h('span', { className: 'bt-set-hint' }, t('minute hour day month weekday'))) : null)),
     error ? h('div', { className: 'bt-set-row' }, h('span', { className: 'bt-danger bt-set-hint' }, error)) : null,
     h('div', { className: 'bt-set-row bt-task-foot' },
       h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: onCancel }, t('Cancel')),
-      h('button', { type: 'submit', className: 'bt-send bt-soft-sm', disabled: busy || !target || title.trim() === '' || prompt.trim() === '' }, busy ? t('Creating…') : t('Create task'))))
+      h('button', { type: 'submit', className: 'bt-send bt-soft-sm', disabled: busy || !target || title.trim() === '' || prompt.trim() === '' },
+        task ? (busy ? t('Saving…') : t('Save')) : busy ? t('Creating…') : t('Create task'))))
 }
 
 // Settings has no schedule service to show: Automation tasks are off in DSH.
@@ -236,8 +315,12 @@ export const SCHEDULE_CSS = `
 .bt-task-title{font-size:13px;line-height:18px;font-weight:500;overflow-wrap:anywhere}
 .bt-task-prompt{font-size:12px;line-height:16px;color:var(--bt-ink-2);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .bt-task-next{flex:none;font-size:12px;line-height:16px;color:var(--bt-ink-3);font-variant-numeric:tabular-nums;white-space:nowrap}
-.bt-task-remove{display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:26px;color:var(--bt-ink-3)}
-.bt-task-remove svg{width:14px;height:14px}
+.bt-task-tools{flex:none;display:flex;align-items:center;gap:2px}
+.bt-task-icon{display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:26px;color:var(--bt-ink-3)}
+.bt-task-icon svg{width:14px;height:14px}
+.bt-task-runs{margin:0;padding-left:18px;font-size:12px;line-height:18px;color:var(--bt-ink-2);font-variant-numeric:tabular-nums}
+.bt-task-edit{display:block}
+.bt-task-cron{min-width:160px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .bt-task-remove[data-confirm]{background:color-mix(in srgb,var(--bt-danger) 10%,transparent);color:var(--bt-danger)}
 .bt-task-head{display:flex;align-items:center;gap:6px}
 .bt-task-form{animation:bt-q-in .4s cubic-bezier(.22,1,.36,1),bt-veil-in .2s ease-out}

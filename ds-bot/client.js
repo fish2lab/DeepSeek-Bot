@@ -920,6 +920,22 @@ var ZH = {
   "How many": "数量",
   Unit: "单位",
   "Create task": "创建任务",
+  Resume: "继续",
+  "Run now": "立即运行",
+  Runs: "运行记录",
+  "Edit task": "编辑任务",
+  "Last run {time}": "上次 {time}",
+  "No runs yet": "还没有运行过",
+  "Couldn't load the runs": "运行记录没有读出来",
+  "Sent to the chat": "已发到对话里",
+  "Cron expression": "cron 表达式",
+  "minute hour day month weekday": "分 时 日 月 周",
+  "This task has already run": "这个任务已经运行过了",
+  "This task changed meanwhile; open it again": "这个任务刚被改过，重新打开再改",
+  "Only repeating tasks can be paused": "只有重复的任务能暂停",
+  "A paused task repeats; pick a repeating time": "暂停的任务是重复的，请选一个重复的时间",
+  "Write five fields: minute hour day month weekday": "写五段：分 时 日 月 周",
+  "The task was not changed": "任务没有改动",
   "Turn on Automation tasks in DSH": "在 DSH 里打开「自动化任务」",
   "Switch on Automation tasks on the Plugins page in Harness settings.": "在 Harness 设置的插件页启用「自动化任务」。",
   "Open Harness settings": "打开 Harness 设置",
@@ -1483,7 +1499,12 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     setBotCapability: (botId, name, attached) => after(call2("bot-capability", { botId, name, attached })),
     schedules: () => call2("schedules"),
     scheduleCreate: (task) => call2("schedule-create", task),
-    scheduleDelete: (sessionId, id) => call2("schedule-delete", { sessionId, id }),
+    scheduleDelete: (task) => call2("schedule-delete", { sessionId: task.sessionId, id: task.id, paused: task.status === "paused" }),
+    scheduleUpdate: (task, change) => call2("schedule-update", { sessionId: task.sessionId, id: task.id, paused: task.status === "paused", ...change }),
+    scheduleHistory: (task) => call2("schedule-history", { sessionId: task.sessionId, id: task.id }),
+    schedulePause: (task) => call2("schedule-pause", { sessionId: task.sessionId, id: task.id }),
+    scheduleResume: (task) => call2("schedule-resume", { id: task.id }),
+    scheduleRun: (task) => call2("schedule-run", { sessionId: task.sessionId, id: task.id, paused: task.status === "paused" }),
     exchange: (a, b) => call2("exchange", { a, b }).catch(() => []),
     exchangeText: (id) => call2("exchange-text", { id }).catch(() => void 0),
     fileText: (file) => call2("file-text", { file }).catch(() => void 0),
@@ -7446,71 +7467,176 @@ function timingText(task) {
       return "";
   }
 }
-var nextText = (task) => task.status === "active" ? t("Next: {time}", { time: dayAndTime(Date.parse(task.scheduledAt)) }) : t("Finished");
+var REPEATING = ["every", "daily", "weekly", "cron"];
+function nextText(task) {
+  if (task.status === "paused") return t("Paused");
+  return task.status === "active" ? t("Next: {time}", { time: dayAndTime(Date.parse(task.scheduledAt)) }) : t("Finished");
+}
+var lastRunText = (task) => task.lastDelivery ? t("Last run {time}", { time: dayAndTime(Date.parse(task.lastDelivery.deliveredAt)) }) : "";
+function TaskRuns({ task, actions }) {
+  const [view, setView] = (0, import_react16.useState)(null);
+  (0, import_react16.useEffect)(() => {
+    let stopped = false;
+    actions.scheduleHistory(task).then(
+      (next) => {
+        if (!stopped) setView(next);
+      },
+      () => {
+        if (!stopped) setView({ runs: [], failed: true });
+      }
+    );
+    return () => {
+      stopped = true;
+    };
+  }, [task.id, task.lastDelivery?.deliveredAt]);
+  if (view === null) return (0, import_react16.createElement)("span", { className: "bt-set-hint" }, t("Loading…"));
+  if (view.runs.length === 0) return (0, import_react16.createElement)("span", { className: "bt-set-hint" }, view.failed ? t("Couldn't load the runs") : t("No runs yet"));
+  return (0, import_react16.createElement)("ol", { className: "bt-task-runs", "aria-label": t("Runs") }, view.runs.map((run) => (0, import_react16.createElement)("li", { key: run.deliveredAt }, dayAndTime(Date.parse(run.deliveredAt)))));
+}
 function TaskRow({ task, actions, onView, showBot, roster }) {
   const [confirming, setConfirming] = (0, import_react16.useState)(false);
   const [busy, setBusy] = (0, import_react16.useState)(false);
+  const [editing, setEditing] = (0, import_react16.useState)(false);
+  const [runs, setRuns] = (0, import_react16.useState)(false);
+  const [note, setNote] = (0, import_react16.useState)(null);
   (0, import_react16.useEffect)(() => {
     if (!confirming) return void 0;
     const timer = setTimeout(() => setConfirming(false), 3e3);
     return () => clearTimeout(timer);
   }, [confirming]);
+  const act = (work, done = onView) => {
+    if (busy) return;
+    setBusy(true);
+    setNote(null);
+    void work().then(
+      (value) => {
+        setBusy(false);
+        done(value);
+      },
+      (failure) => {
+        setBusy(false);
+        setNote({ error: true, text: hostText(failure?.message ?? String(failure)) });
+      }
+    );
+  };
   const remove = () => {
     if (!confirming) {
       setConfirming(true);
       return;
     }
-    setBusy(true);
-    void actions.scheduleDelete(task.sessionId, task.id).then(onView, () => setBusy(false));
+    act(() => actions.scheduleDelete(task));
   };
+  if (editing) {
+    return (0, import_react16.createElement)("div", { className: "bt-set-row bt-task-edit" }, (0, import_react16.createElement)(TaskForm, {
+      roster,
+      actions,
+      task,
+      onCancel: () => setEditing(false),
+      onDone: (next) => {
+        setEditing(false);
+        onView(next);
+      }
+    }));
+  }
+  const live = task.status !== "inactive";
+  const paused = task.status === "paused";
   const room2 = task.roomId ? roster.roomsById[task.roomId] : void 0;
+  const hint = [timingText(task), room2 ? t("in {name}", { name: room2.name }) : "", lastRunText(task)].filter(Boolean).join(" · ");
   return (0, import_react16.createElement)(
-    "div",
-    { className: "bt-set-row bt-task", "data-done": task.status === "active" ? void 0 : "", "data-busy": busy || void 0 },
-    showBot ? (0, import_react16.createElement)(BotAvatar, { bot: roster.byId[task.botId], size: 28, badge: false, live: false }) : null,
+    import_react16.Fragment,
+    null,
     (0, import_react16.createElement)(
-      "span",
-      { className: "bt-set-copy" },
-      (0, import_react16.createElement)("span", { className: "bt-task-title" }, task.title),
-      (0, import_react16.createElement)("span", { className: "bt-set-hint" }, [timingText(task), room2 ? t("in {name}", { name: room2.name }) : ""].filter(Boolean).join(" · ")),
-      task.prompt && task.prompt !== task.title ? (0, import_react16.createElement)("span", { className: "bt-task-prompt" }, task.prompt) : null
+      "div",
+      { className: "bt-set-row bt-task", "data-done": task.status === "active" ? void 0 : "", "data-busy": busy || void 0 },
+      showBot ? (0, import_react16.createElement)(BotAvatar, { bot: roster.byId[task.botId], size: 28, badge: false, live: false }) : null,
+      (0, import_react16.createElement)(
+        "span",
+        { className: "bt-set-copy" },
+        (0, import_react16.createElement)("span", { className: "bt-task-title" }, task.title),
+        (0, import_react16.createElement)("span", { className: "bt-set-hint" }, hint),
+        task.prompt && task.prompt !== task.title ? (0, import_react16.createElement)("span", { className: "bt-task-prompt" }, task.prompt) : null,
+        note ? (0, import_react16.createElement)("span", { className: note.error ? "bt-set-hint bt-danger" : "bt-set-hint", role: "status" }, note.text) : null
+      ),
+      (0, import_react16.createElement)("span", { className: "bt-task-next" }, nextText(task)),
+      (0, import_react16.createElement)(
+        "span",
+        { className: "bt-task-tools" },
+        live ? (0, import_react16.createElement)("button", {
+          type: "button",
+          className: "bt-mini",
+          disabled: busy,
+          onClick: () => act(() => actions.scheduleRun(task), () => setNote({ text: t("Sent to the chat") }))
+        }, t("Run now")) : null,
+        live && REPEATING.includes(task.kind) ? (0, import_react16.createElement)("button", {
+          type: "button",
+          className: "bt-mini",
+          disabled: busy,
+          onClick: () => act(() => paused ? actions.scheduleResume(task) : actions.schedulePause(task))
+        }, paused ? t("Resume") : t("Pause")) : null,
+        task.lastDelivery ? (0, import_react16.createElement)("button", { type: "button", className: "bt-mini", "aria-expanded": runs, onClick: () => setRuns((open) => !open) }, t("Runs")) : null,
+        live ? (0, import_react16.createElement)("button", {
+          type: "button",
+          className: "bt-mini bt-task-icon",
+          disabled: busy,
+          "aria-label": t("Edit task"),
+          title: t("Edit task"),
+          onClick: () => setEditing(true)
+        }, (0, import_react16.createElement)(PencilIcon)) : null,
+        (0, import_react16.createElement)("button", {
+          type: "button",
+          className: "bt-mini bt-task-icon bt-task-remove",
+          "data-confirm": confirming || void 0,
+          disabled: busy,
+          "aria-label": confirming ? t("Click again to delete") : t("Delete task"),
+          title: confirming ? void 0 : t("Delete task"),
+          onClick: remove
+        }, confirming ? t("Delete") : (0, import_react16.createElement)(TrashIcon))
+      )
     ),
-    (0, import_react16.createElement)("span", { className: "bt-task-next" }, nextText(task)),
-    (0, import_react16.createElement)("button", {
-      type: "button",
-      className: "bt-mini bt-task-remove",
-      "data-confirm": confirming || void 0,
-      disabled: busy,
-      "aria-label": confirming ? t("Click again to delete") : t("Delete task"),
-      title: confirming ? void 0 : t("Delete task"),
-      onClick: remove
-    }, confirming ? t("Delete") : (0, import_react16.createElement)(TrashIcon))
+    runs ? (0, import_react16.createElement)("div", { className: "bt-set-row bt-task-runs-row" }, (0, import_react16.createElement)(TaskRuns, { task, actions })) : null
   );
 }
 var pad = (number) => String(number).padStart(2, "0");
+var localInput = (date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 function inAnHour() {
   const date = new Date(Date.now() + 36e5);
   date.setMinutes(0, 0, 0);
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:00`;
+  return localInput(date);
 }
-var KINDS = [["at", "Once"], ["daily", "Every day"], ["weekly", "Every week"], ["every", "Repeat"]];
+var KINDS = [["at", "Once"], ["daily", "Every day"], ["weekly", "Every week"], ["every", "Repeat"], ["cron", "Custom"]];
 var UNITS = [["minutes", 1, "minutes"], ["hours", 60, "hours"], ["days", 1440, "days"]];
-function TaskForm({ roster, actions, start, onDone, onCancel }) {
-  const [target, setTarget] = (0, import_react16.useState)(start ?? roster.bots[0]?.id ?? "");
-  const [title, setTitle] = (0, import_react16.useState)("");
-  const [prompt, setPrompt] = (0, import_react16.useState)("");
-  const [kind, setKind] = (0, import_react16.useState)("daily");
-  const [at, setAt] = (0, import_react16.useState)(inAnHour);
-  const [time, setTime] = (0, import_react16.useState)("09:00");
-  const [weekdays, setWeekdays] = (0, import_react16.useState)([1, 2, 3, 4, 5]);
-  const [count, setCount] = (0, import_react16.useState)(1);
-  const [unit, setUnit] = (0, import_react16.useState)("hours");
+function formStart(task) {
+  const start = { kind: "daily", at: inAnHour(), time: "09:00", weekdays: [1, 2, 3, 4, 5], count: 1, unit: "hours", expression: "0 9 * * 1-5" };
+  if (task === void 0) return start;
+  Object.assign(start, { kind: task.kind === "after" ? "at" : task.kind, time: clock2(task.time) || start.time, weekdays: task.weekdays ?? start.weekdays, expression: task.expression ?? start.expression });
+  if (start.kind === "at") start.at = localInput(new Date(Date.parse(task.scheduledAt)));
+  if (task.kind === "every") {
+    const [unit, minutes] = [...UNITS].reverse().find(([, size]) => task.everySeconds % (size * 60) === 0) ?? UNITS[0];
+    Object.assign(start, { unit, count: task.everySeconds / (minutes * 60) });
+  }
+  return start;
+}
+function TaskForm({ roster, actions, start, task, onDone, onCancel }) {
+  const [target, setTarget] = (0, import_react16.useState)(task ? task.roomId ?? task.botId : start ?? roster.bots[0]?.id ?? "");
+  const [title, setTitle] = (0, import_react16.useState)(task?.title ?? "");
+  const [prompt, setPrompt] = (0, import_react16.useState)(task?.prompt ?? "");
+  const begin = formStart(task);
+  const [kind, setKind] = (0, import_react16.useState)(begin.kind);
+  const [at, setAt] = (0, import_react16.useState)(begin.at);
+  const [time, setTime] = (0, import_react16.useState)(begin.time);
+  const [weekdays, setWeekdays] = (0, import_react16.useState)(begin.weekdays);
+  const [count, setCount] = (0, import_react16.useState)(begin.count);
+  const [unit, setUnit] = (0, import_react16.useState)(begin.unit);
+  const [expression, setExpression] = (0, import_react16.useState)(begin.expression);
   const [busy, setBusy] = (0, import_react16.useState)(false);
   const [error, setError] = (0, import_react16.useState)("");
+  const kinds = task?.status === "paused" ? KINDS.filter(([id]) => id !== "at") : KINDS;
+  const zone = task?.timeZone ?? localZone();
   const timing = () => {
     if (kind === "at") return { kind, at: new Date(at).toISOString() };
     if (kind === "every") return { kind, minutes: Math.round(Number(count) * UNITS.find(([id]) => id === unit)[1]) };
-    return { kind, time, timeZone: localZone(), ...kind === "weekly" ? { weekdays } : {} };
+    if (kind === "cron") return { kind, expression, timeZone: zone };
+    return { kind, time, timeZone: zone, ...kind === "weekly" ? { weekdays } : {} };
   };
   const submit = (event) => {
     event.preventDefault();
@@ -7525,7 +7651,8 @@ function TaskForm({ roster, actions, start, onDone, onCancel }) {
       setBusy(false);
       return;
     }
-    void actions.scheduleCreate({ target, title, prompt, when: when3 }).then(onDone, (failure) => {
+    const saving = task ? actions.scheduleUpdate(task, { title, prompt, when: when3 }) : actions.scheduleCreate({ target, title, prompt, when: when3 });
+    void saving.then(onDone, (failure) => {
       setError(hostText(failure?.message ?? String(failure)));
       setBusy(false);
     });
@@ -7533,14 +7660,14 @@ function TaskForm({ roster, actions, start, onDone, onCancel }) {
   const toggleDay = (day) => setWeekdays((days) => days.includes(day) ? days.filter((item) => item !== day) : [...days, day].sort());
   return (0, import_react16.createElement)(
     "form",
-    { className: "bt-set-card bt-task-form", onSubmit: submit },
+    { className: task ? "bt-task-form" : "bt-set-card bt-task-form", onSubmit: submit },
     (0, import_react16.createElement)(
       "label",
       { className: "bt-set-row bt-bs-row" },
       (0, import_react16.createElement)("span", { className: "bt-set-copy" }, (0, import_react16.createElement)("span", { className: "bt-bs-label" }, t("Send to"))),
       (0, import_react16.createElement)(
         "select",
-        { className: "bt-select bt-task-bot", value: target, onChange: (event) => setTarget(event.target.value) },
+        { className: "bt-select bt-task-bot", value: target, disabled: task !== void 0, onChange: (event) => setTarget(event.target.value) },
         (0, import_react16.createElement)("optgroup", { label: t("Bots") }, roster.bots.map((bot) => (0, import_react16.createElement)("option", { key: bot.id, value: bot.id }, bot.name))),
         roster.rooms.length > 0 ? (0, import_react16.createElement)("optgroup", { label: t("Group chats") }, roster.rooms.map((room2) => (0, import_react16.createElement)("option", { key: room2.id, value: room2.id }, room2.name))) : null
       )
@@ -7561,7 +7688,7 @@ function TaskForm({ roster, actions, start, onDone, onCancel }) {
       "div",
       { className: "bt-set-row bt-bs-row bt-bs-stack" },
       (0, import_react16.createElement)("span", { className: "bt-set-copy" }, (0, import_react16.createElement)("span", { className: "bt-bs-label" }, t("When"))),
-      (0, import_react16.createElement)(Segmented, { label: t("When"), value: kind }, KINDS.map(([id, label]) => (0, import_react16.createElement)("button", { key: id, type: "button", "aria-pressed": kind === id, onClick: () => setKind(id) }, t(label)))),
+      (0, import_react16.createElement)(Segmented, { label: t("When"), value: kind }, kinds.map(([id, label]) => (0, import_react16.createElement)("button", { key: id, type: "button", "aria-pressed": kind === id, onClick: () => setKind(id) }, t(label)))),
       (0, import_react16.createElement)(
         "div",
         { key: kind, className: "bt-task-when bt-veil" },
@@ -7584,6 +7711,12 @@ function TaskForm({ roster, actions, start, onDone, onCancel }) {
             { className: "bt-select bt-task-unit", value: unit, "aria-label": t("Unit"), onChange: (event) => setUnit(event.target.value) },
             UNITS.map(([id, , label]) => (0, import_react16.createElement)("option", { key: id, value: id }, t(label)))
           )
+        ) : null,
+        kind === "cron" ? (0, import_react16.createElement)(
+          import_react16.Fragment,
+          null,
+          (0, import_react16.createElement)("input", { className: "bt-input bt-task-cron", value: expression, spellCheck: false, "aria-label": t("Cron expression"), placeholder: "0 9 * * 1-5", onChange: (event) => setExpression(event.target.value) }),
+          (0, import_react16.createElement)("span", { className: "bt-set-hint" }, t("minute hour day month weekday"))
         ) : null
       )
     ),
@@ -7592,7 +7725,11 @@ function TaskForm({ roster, actions, start, onDone, onCancel }) {
       "div",
       { className: "bt-set-row bt-task-foot" },
       (0, import_react16.createElement)("button", { type: "button", className: "bt-soft bt-soft-sm", onClick: onCancel }, t("Cancel")),
-      (0, import_react16.createElement)("button", { type: "submit", className: "bt-send bt-soft-sm", disabled: busy || !target || title.trim() === "" || prompt.trim() === "" }, busy ? t("Creating…") : t("Create task"))
+      (0, import_react16.createElement)(
+        "button",
+        { type: "submit", className: "bt-send bt-soft-sm", disabled: busy || !target || title.trim() === "" || prompt.trim() === "" },
+        task ? busy ? t("Saving…") : t("Save") : busy ? t("Creating…") : t("Create task")
+      )
     )
   );
 }
@@ -7675,8 +7812,12 @@ var SCHEDULE_CSS = `
 .bt-task-title{font-size:13px;line-height:18px;font-weight:500;overflow-wrap:anywhere}
 .bt-task-prompt{font-size:12px;line-height:16px;color:var(--bt-ink-2);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .bt-task-next{flex:none;font-size:12px;line-height:16px;color:var(--bt-ink-3);font-variant-numeric:tabular-nums;white-space:nowrap}
-.bt-task-remove{display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:26px;color:var(--bt-ink-3)}
-.bt-task-remove svg{width:14px;height:14px}
+.bt-task-tools{flex:none;display:flex;align-items:center;gap:2px}
+.bt-task-icon{display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:26px;color:var(--bt-ink-3)}
+.bt-task-icon svg{width:14px;height:14px}
+.bt-task-runs{margin:0;padding-left:18px;font-size:12px;line-height:18px;color:var(--bt-ink-2);font-variant-numeric:tabular-nums}
+.bt-task-edit{display:block}
+.bt-task-cron{min-width:160px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .bt-task-remove[data-confirm]{background:color-mix(in srgb,var(--bt-danger) 10%,transparent);color:var(--bt-danger)}
 .bt-task-head{display:flex;align-items:center;gap:6px}
 .bt-task-form{animation:bt-q-in .4s cubic-bezier(.22,1,.36,1),bt-veil-in .2s ease-out}
