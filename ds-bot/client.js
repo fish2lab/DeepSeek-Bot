@@ -1489,6 +1489,7 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     fileText: (file) => call2("file-text", { file }).catch(() => void 0),
     roomProgress: (roomId) => call2("room-progress", { roomId }).catch(() => []),
     earlier: (sessionId, cursor) => call2("earlier", { sessionId, cursor: cursor ?? null }),
+    searchHistory: (query, signal) => call2("search", { query }, signal),
     // Hours come back in this browser's time zone, so days start at local midnight.
     usage: () => call2("usage", { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }),
     // `summarize` starts a summary when the entries changed; `regenerate` always does.
@@ -6666,6 +6667,7 @@ function usePaneLeft() {
 // src/client/palette.js
 var import_react13 = require("react");
 var PALETTE_EXIT_MS = 160;
+var SEARCH_PAUSE_MS = 200;
 function CommandPalette({ start, token, roster, actions, useSessions }) {
   const [query, setQuery] = (0, import_react13.useState)(start ?? "");
   const [cursor, setCursor] = (0, import_react13.useState)(0);
@@ -6677,6 +6679,19 @@ function CommandPalette({ start, token, roster, actions, useSessions }) {
     setTimeout(() => actions.closePalette(token), PALETTE_EXIT_MS);
   };
   useEscape(close);
+  const [indexed, setIndexed] = (0, import_react13.useState)({ query: "", hits: [] });
+  (0, import_react13.useEffect)(() => {
+    if (wanted.length < 2) return void 0;
+    const abort = new AbortController();
+    const timer = setTimeout(() => {
+      actions.searchHistory(wanted, abort.signal).then((hits) => setIndexed({ query: wanted, hits }), () => {
+      });
+    }, SEARCH_PAUSE_MS);
+    return () => {
+      clearTimeout(timer);
+      abort.abort();
+    };
+  }, [wanted]);
   const ids = [...roster.bots.map(currentPart), ...roster.rooms.map((item) => item.id)];
   const found = useSessions((list) => {
     if (wanted.length < 2) return "[]";
@@ -6688,12 +6703,12 @@ function CommandPalette({ start, token, roster, actions, useSessions }) {
       for (let index2 = outline.length - 1; index2 >= 0 && hits.length < 30; index2 -= 1) {
         const entry = outline[index2];
         if (hidden.includes(entry.turn)) continue;
-        for (const raw of [entry.response, entry.prompt]) {
-          const text = stripHeader(raw ?? "").replace(/\s+/g, " ").trim();
+        for (const field of ["response", "prompt"]) {
+          const text = stripHeader(entry[field] ?? "").replace(/\s+/g, " ").trim();
           const at = text.toLowerCase().indexOf(wanted);
           if (at < 0) continue;
           const from = Math.max(0, at - 24);
-          hits.push([id, entry.turn, (from > 0 ? "…" : "") + text.slice(from, at + wanted.length + 60)]);
+          hits.push([id, entry.turn, (from > 0 ? "…" : "") + text.slice(from, at + wanted.length + 60), field, entry.seq, outline[index2 + 1]?.seq ?? null]);
           break;
         }
       }
@@ -6735,17 +6750,28 @@ function CommandPalette({ start, token, roster, actions, useSessions }) {
     run: () => actions.openAgent(agent.id)
   }));
   if (agents.length) sections.push(["DSH Agent", agents]);
-  const messages = JSON.parse(found).map(([id, turn, snippet]) => {
+  const messageRow = (key, id, subtitle) => {
     const bot = roster.byId[id];
     const room2 = roster.roomsById[id];
     return {
-      key: `${id}:${turn}`,
+      key,
       title: bot?.name ?? room2?.name ?? t("Bot"),
-      subtitle: snippet,
+      subtitle,
       avatar: bot ? (0, import_react13.createElement)(BotAvatar, { bot, size: 24, badge: false, live: false }) : (0, import_react13.createElement)(RoomAvatar, { room: room2, roster, size: 24 }),
       run: () => actions.openSession(id)
     };
-  });
+  };
+  const outlineHits = JSON.parse(found);
+  const matchedHere = (hit) => outlineHits.some(([id, , , field, from, until]) => id === hit.sessionId && hit.seq >= from && (until === null || hit.seq < until) && (field === "prompt" ? hit.who === "user" : hit.who === roster.byId[id]?.name));
+  const indexHits = indexed.query === wanted ? indexed.hits.filter((hit) => (roster.byId[hit.chatId] || roster.roomsById[hit.chatId]) && !matchedHere(hit)) : [];
+  const messages = [
+    ...outlineHits.map(([id, turn, snippet]) => messageRow(`${id}:${turn}`, id, snippet)),
+    ...indexHits.map((hit) => messageRow(
+      `${hit.sessionId}#${hit.seq}#${hit.time}#${hit.who}`,
+      hit.chatId,
+      roster.roomsById[hit.chatId] && hit.who && hit.who !== "user" ? `${hit.who}: ${hit.snippet}` : hit.snippet
+    ))
+  ];
   if (messages.length) sections.push([t("Messages"), messages]);
   const commands = [
     { key: "cmd:new", icon: (0, import_react13.createElement)(PlusIcon), title: t("New chat"), run: () => actions.openNewChat("new") },

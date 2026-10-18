@@ -10,8 +10,10 @@ import { t } from './i18n.js'
 
 // Search is a command palette: a 560px dialog, a search header, and 49px
 // rows (24px avatar, title, subtitle). Bots and groups match on name and role; past
-// messages match on their text.
+// messages match on their text: the loaded turns of each chat's current part here, and
+// every part and every group reply in the host's chat index once typing pauses.
 const PALETTE_EXIT_MS = 160
+const SEARCH_PAUSE_MS = 200
 export function CommandPalette({ start, token, roster, actions, useSessions }) {
   const [query, setQuery] = useState(start ?? '')
   const [cursor, setCursor] = useState(0)
@@ -23,6 +25,18 @@ export function CommandPalette({ start, token, roster, actions, useSessions }) {
     setTimeout(() => actions.closePalette(token), PALETTE_EXIT_MS)
   }
   useEscape(close)
+  const [indexed, setIndexed] = useState({ query: '', hits: [] })
+  useEffect(() => {
+    if (wanted.length < 2) return undefined
+    const abort = new AbortController()
+    const timer = setTimeout(() => {
+      actions.searchHistory(wanted, abort.signal).then(hits => setIndexed({ query: wanted, hits }), () => {})
+    }, SEARCH_PAUSE_MS)
+    return () => {
+      clearTimeout(timer)
+      abort.abort()
+    }
+  }, [wanted])
   const ids = [...roster.bots.map(currentPart), ...roster.rooms.map(item => item.id)]
   const found = useSessions((list) => {
     if (wanted.length < 2) return '[]'
@@ -34,12 +48,13 @@ export function CommandPalette({ start, token, roster, actions, useSessions }) {
       for (let index = outline.length - 1; index >= 0 && hits.length < 30; index -= 1) {
         const entry = outline[index]
         if (hidden.includes(entry.turn)) continue
-        for (const raw of [entry.response, entry.prompt]) {
-          const text = stripHeader(raw ?? '').replace(/\s+/g, ' ').trim()
+        for (const field of ['response', 'prompt']) {
+          const text = stripHeader(entry[field] ?? '').replace(/\s+/g, ' ').trim()
           const at = text.toLowerCase().indexOf(wanted)
           if (at < 0) continue
           const from = Math.max(0, at - 24)
-          hits.push([id, entry.turn, (from > 0 ? '…' : '') + text.slice(from, at + wanted.length + 60)])
+          // The turn's seqs, from its start to the next turn's, place an index hit in it.
+          hits.push([id, entry.turn, (from > 0 ? '…' : '') + text.slice(from, at + wanted.length + 60), field, entry.seq, outline[index + 1]?.seq ?? null])
           break
         }
       }
@@ -67,15 +82,29 @@ export function CommandPalette({ start, token, roster, actions, useSessions }) {
     run: () => actions.openAgent(agent.id),
   }))
   if (agents.length) sections.push(['DSH Agent', agents])
-  const messages = JSON.parse(found).map(([id, turn, snippet]) => {
+  const messageRow = (key, id, subtitle) => {
     const bot = roster.byId[id]
     const room = roster.roomsById[id]
     return {
-      key: `${id}:${turn}`, title: bot?.name ?? room?.name ?? t('Bot'), subtitle: snippet,
+      key, title: bot?.name ?? room?.name ?? t('Bot'), subtitle,
       avatar: bot ? h(BotAvatar, { bot, size: 24, badge: false, live: false }) : h(RoomAvatar, { room, roster, size: 24 }),
       run: () => actions.openSession(id),
     }
-  })
+  }
+  const outlineHits = JSON.parse(found)
+  // A message the loaded turns matched shows once, from them: the same turn, and the
+  // user's words for its prompt or the Bot's own for its response.
+  const matchedHere = hit => outlineHits.some(([id, , , field, from, until]) => id === hit.sessionId
+    && hit.seq >= from && (until === null || hit.seq < until)
+    && (field === 'prompt' ? hit.who === 'user' : hit.who === roster.byId[id]?.name))
+  const indexHits = indexed.query === wanted
+    ? indexed.hits.filter(hit => (roster.byId[hit.chatId] || roster.roomsById[hit.chatId]) && !matchedHere(hit))
+    : []
+  const messages = [
+    ...outlineHits.map(([id, turn, snippet]) => messageRow(`${id}:${turn}`, id, snippet)),
+    ...indexHits.map(hit => messageRow(`${hit.sessionId}#${hit.seq}#${hit.time}#${hit.who}`, hit.chatId,
+      roster.roomsById[hit.chatId] && hit.who && hit.who !== 'user' ? `${hit.who}: ${hit.snippet}` : hit.snippet)),
+  ]
   if (messages.length) sections.push([t('Messages'), messages])
   const commands = [
     { key: 'cmd:new', icon: h(PlusIcon), title: t('New chat'), run: () => actions.openNewChat('new') },

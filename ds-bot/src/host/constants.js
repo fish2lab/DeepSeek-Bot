@@ -83,6 +83,7 @@ export const ANCHOR_LINE_MAX = 8000
 export const OWN_CHAT_BRIEF = 10
 export const OWN_CHAT_READ = 12
 export const OWN_CHAT_SEARCH = 20
+export const GROUP_CHAT_SEARCH = 20
 export const HISTORY_PAGE = 200
 export const HISTORY_PAGES_MAX = 50
 export const HISTORY_TIMEOUT_MS = 20_000

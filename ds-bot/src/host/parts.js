@@ -571,7 +571,7 @@ export function install(rt) {
   function handoffPackage({ room, segment, lines, number, resume, overflow, failed, bare, folder }) {
     const where = room ? `your conversation in the group chat "${room.name}"` : 'your own chat with the user'
     const lookup = room
-      ? 'read_group_chat shows the group\'s latest messages, and read_own_chat your own chat.'
+      ? 'read_group_chat shows the group\'s latest messages and searches all of it with words, and read_own_chat your own chat.'
       : 'read_own_chat searches every part, reads around an anchor such as [part 2 #1234 · …], and shows the note that closed any earlier part.'
     const reason = failed !== undefined ? `a request in the previous part kept failing (${failed})`
       : overflow ? 'the previous part overflowed the model\'s window'

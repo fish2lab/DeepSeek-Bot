@@ -638,9 +638,10 @@ export function install(rt) {
 
   ctx.tools.register(defineTool({
     name: 'read_group_chat',
-    description: 'Read the latest messages of a group chat, including what you said there. You speak in groups from separate conversations, so your own chat does not show them. Main Bots may read any group; others the groups they are in.',
+    description: 'Read the latest messages of a group chat, including what you said there, or search its whole history with words. You speak in groups from separate conversations, so your own chat does not show them. Main Bots may read any group; others the groups they are in.',
     parameters: {
       group: GROUP_REF,
+      query: { type: 'string', description: 'Words to look for in everything said in the group, older messages too, separated by spaces. A message must have all of them; when none has, those with the most are shown; long messages are cut around the match. Omit for the latest messages' },
       seq: { type: 'integer', description: 'Read one message whole: the seq that a cut message names' },
     },
     output,
@@ -655,6 +656,13 @@ export function install(rt) {
       if (args.seq !== undefined) {
         const line = room.log.find(entry => entry.seq === Number(args.seq))
         return line === undefined ? `"${room.name}" no longer keeps message ${args.seq}; it keeps its latest ${ROOM_LOG_MAX}.` : lineText(line, memberText(room)(line))
+      }
+      const query = String(args.query ?? '').trim().slice(0, 80)
+      if (query !== '') {
+        const { lines, every } = await rt.searchGroupChat(room, query)
+        if (lines.length === 0) return `Nothing said in "${room.name}" mentions "${query}".`
+        const heading = every ? `messages mentioning "${query}"` : `no message has all of "${query}"; messages with the most of these words`
+        return `"${room.name}", ${heading} (oldest first):\n${lines.join('\n')}`
       }
       // Thirty whole lines could fill the context, so a long one shows its start.
       const short = (line) => {

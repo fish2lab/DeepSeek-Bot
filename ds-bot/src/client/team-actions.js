@@ -89,6 +89,7 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, tur
     fileText: file => call('file-text', { file }).catch(() => undefined),
     roomProgress: roomId => call('room-progress', { roomId }).catch(() => []),
     earlier: (sessionId, cursor) => call('earlier', { sessionId, cursor: cursor ?? null }),
+    searchHistory: (query, signal) => call('search', { query }, signal),
     // Hours come back in this browser's time zone, so days start at local midnight.
     usage: () => call('usage', { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }),
     // `summarize` starts a summary when the entries changed; `regenerate` always does.
