@@ -7,6 +7,7 @@ export const STORAGE = {
   seen: 'ds-bot:seen',
   prefs: 'ds-bot:prefs',
   surface: 'ds-bot:surface',
+  replyNotices: 'ds-bot:reply-notices',
   agentSessions: 'ds-bot:agent-sessions',
   browserWidth: 'ds-bot:browser-width',
   browsers: 'ds-bot.browser.v2',

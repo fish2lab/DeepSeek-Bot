@@ -34,7 +34,7 @@ import { ErrorToast, FEEDBACK_CSS } from './feedback.js'
 import { ABOUT_CSS } from './about.js'
 import { MEMBER_CSS, MemberDock } from './member-status.js'
 import { USER_MESSAGE_CSS, UserMessageCell, canDrawUserMessages } from './user-message.js'
-import { noticeApprovals } from './approval-notices.js'
+import { noticeBots } from './notices.js'
 
 export const inject = ['sessions', 'uiWorkspace', 'uiConversation', 'slots', 'theme', 'layout']
 
@@ -170,6 +170,8 @@ export function apply(ctx) {
     }
   }
 
+  // Counts the roster poll's pulls; a reply notification waits for the next one.
+  const polled = createSource(0)
   ctx.effect(() => {
     let stopped = false
     let running = false
@@ -178,7 +180,10 @@ export function apply(ctx) {
       clearTimeout(timer)
       if (running || stopped) return
       running = true
-      try { await pull() } catch (error) { if (!stopped) console.warn('[ds-bot] state', error) } finally { running = false }
+      try {
+        await pull()
+        polled.set(count => count + 1)
+      } catch (error) { if (!stopped) console.warn('[ds-bot] state', error) } finally { running = false }
       if (!stopped) timer = setTimeout(loop, document.hidden ? 10000 : 1500)
     }
     const wake = () => { if (!document.hidden) void loop() }
@@ -564,12 +569,14 @@ export function apply(ctx) {
   const browserPages = browsers?.pages ?? createSource({})
   const browserTabs = browsers?.tabs ?? createSource({})
   const face = () => ({ actions, hooks: { roster, ui, activity, work, memoryNews, registry, turnClock, live, cards, browserPages, browserTabs, surface, update } })
-  ctx.effect(() => noticeApprovals({
+  ctx.effect(() => noticeBots({
     work,
     roster,
+    sessions: ctx.sessions.list,
+    polled,
     shownSession: () => Object.values(ctx.sessions.list.getSnapshot().byId ?? {}).find(session => (session?.retainedBy?.mainView ?? 0) > 0)?.id,
     openSession: id => actions.openSession(id),
-  }), 'ds-bot: approval notifications')
+  }), 'ds-bot: notifications')
   const assistantFace = (sessionId) => {
     const binding = ctx.sessions.binding(sessionId)
     if (binding === undefined) throw new Error(`ds-bot: unknown session "${sessionId}"`)

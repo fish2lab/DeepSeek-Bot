@@ -568,6 +568,12 @@ var ZH = {
   "Asked to make the tool call it wrote as text": "工具调用被写成了文字，已让它重新调用",
   "A Bot": "一个 Bot",
   "{name} is waiting for your approval": "{name} 等你批准",
+  "{name} asked you a question": "{name} 向你提了一个问题",
+  "{name} replied": "{name} 回复了",
+  "{name} in {group}": "{name}（{group}）",
+  "Notifications": "通知",
+  "Notify me when a Bot replies": "Bot 回复时通知我",
+  "When this window is hidden or shows another chat, and the system allows notifications. Approvals and questions always notify.": "在此窗口隐藏或显示其他对话、且系统允许通知时提醒。批准请求和提问总会通知。",
   "{first} and {second} are waiting for your approval": "{first}、{second} 等你批准",
   "{first}, {second} and {count} more are waiting for your approval": "{first}、{second} 等 {total} 个等你批准",
   "Waiting for your approval": "等你批准",
@@ -3960,7 +3966,7 @@ function SecretRow({ secret, roster, actions, run, open, onToggle }) {
     if (!open) setConfirm(false);
   }, [open]);
   const asker = secret.requestedBy ? roster.byId[secret.requestedBy]?.name ?? t("a deleted Bot") : t("you");
-  const allowed = secret.scope === "all" ? [] : secret.scope.map((id) => roster.byId[id]).filter(Boolean);
+  const allowed2 = secret.scope === "all" ? [] : secret.scope.map((id) => roster.byId[id]).filter(Boolean);
   const meta = [t("Asked by {name}", { name: asker }), t("added {time}", { time: when(secret.createdAt) }), secret.lastUsedAt ? t("last used {time}", { time: when(secret.lastUsedAt) }) : t("not used yet")].join(" · ");
   return (0, import_react5.createElement)(
     "div",
@@ -3977,7 +3983,7 @@ function SecretRow({ secret, roster, actions, run, open, onToggle }) {
       (0, import_react5.createElement)(
         "span",
         { className: "bt-set-control" },
-        secret.scope === "all" ? (0, import_react5.createElement)("span", { className: "bt-tag" }, t("All Bots")) : allowed.length === 0 ? (0, import_react5.createElement)("span", { className: "bt-tag" }, t("No Bot")) : (0, import_react5.createElement)("span", { className: "bt-secret-faces", title: allowed.map((bot) => bot.name).join(", ") }, allowed.slice(0, 5).map((bot) => (0, import_react5.createElement)(BotAvatar, { key: bot.id, bot, size: 20, badge: false, live: false })))
+        secret.scope === "all" ? (0, import_react5.createElement)("span", { className: "bt-tag" }, t("All Bots")) : allowed2.length === 0 ? (0, import_react5.createElement)("span", { className: "bt-tag" }, t("No Bot")) : (0, import_react5.createElement)("span", { className: "bt-secret-faces", title: allowed2.map((bot) => bot.name).join(", ") }, allowed2.slice(0, 5).map((bot) => (0, import_react5.createElement)(BotAvatar, { key: bot.id, bot, size: 20, badge: false, live: false })))
       )
     ),
     open ? (0, import_react5.createElement)(
@@ -5322,7 +5328,7 @@ function BotRow({ bot, roster, actions, useSessions, useSessionStatus, useSessio
       (0, import_react9.createElement)("span", { className: "bt-row-name" }, (0, import_react9.createElement)("span", { className: "bt-row-title" }, bot.name), pinned ? (0, import_react9.createElement)(PinMark) : null),
       awayLine ? (0, import_react9.createElement)("span", { className: "bt-row-preview" }, awayLine) : waitsFor ? (0, import_react9.createElement)("span", { className: "bt-row-preview" }, waitsFor) : preview ? (0, import_react9.createElement)("span", { className: "bt-row-preview" }, preview) : null
     ) : null,
-    wide && unread && !active ? (0, import_react9.createElement)("span", { className: "bt-unread", "aria-hidden": true }) : null
+    wide && alert && !active ? (0, import_react9.createElement)("span", { className: "bt-unread bt-unread-wait", "aria-hidden": true }) : wide && unread && !active ? (0, import_react9.createElement)("span", { className: "bt-unread", "aria-hidden": true }) : null
   );
 }
 function RoomRow({ room: room2, roster, actions, useSessions, useSessionStatus, useSessionRetainInfo, useWork, wide, marked }) {
@@ -6735,13 +6741,13 @@ function CommandPalette({ start, token, roster, actions, useSessions }) {
     run: () => actions.openAgent(agent.id)
   }));
   if (agents.length) sections.push(["DSH Agent", agents]);
-  const messages = JSON.parse(found).map(([id, turn, snippet]) => {
+  const messages = JSON.parse(found).map(([id, turn, snippet2]) => {
     const bot = roster.byId[id];
     const room2 = roster.roomsById[id];
     return {
       key: `${id}:${turn}`,
       title: bot?.name ?? room2?.name ?? t("Bot"),
-      subtitle: snippet,
+      subtitle: snippet2,
       avatar: bot ? (0, import_react13.createElement)(BotAvatar, { bot, size: 24, badge: false, live: false }) : (0, import_react13.createElement)(RoomAvatar, { room: room2, roster, size: 24 }),
       run: () => actions.openSession(id)
     };
@@ -11476,6 +11482,208 @@ var PROVIDERS_CSS = `
 @media (prefers-reduced-motion:reduce){.bt-provider-add{animation:none}}
 `;
 
+// src/client/storage.js
+var STORAGE = {
+  unread: "ds-bot:unread",
+  reactions: "ds-bot:reactions",
+  seen: "ds-bot:seen",
+  prefs: "ds-bot:prefs",
+  surface: "ds-bot:surface",
+  replyNotices: "ds-bot:reply-notices",
+  agentSessions: "ds-bot:agent-sessions",
+  browserWidth: "ds-bot:browser-width",
+  browsers: "ds-bot.browser.v2"
+};
+var LEGACY_PREFIXES = ["dsh-bot:", "dsh-bot-team:"];
+var LEGACY_BROWSER_KEYS = ["ds-bot.browser.v1", "dsh-bot.browser.v1"];
+var LEGACY_THEMES = { grok: "mono" };
+function legacyKeys(key) {
+  if (key === STORAGE.browsers) return LEGACY_BROWSER_KEYS;
+  const name = key.slice(key.indexOf(":") + 1);
+  return LEGACY_PREFIXES.map((prefix) => `${prefix}${name}`);
+}
+var migrateBrowsers = (storage) => {
+  if (storage.getItem(STORAGE.browsers) !== null) {
+    for (const key of LEGACY_BROWSER_KEYS) storage.removeItem(key);
+    return;
+  }
+  for (const key of LEGACY_BROWSER_KEYS) {
+    try {
+      const value = storage.getItem(key);
+      if (value === null) continue;
+      const previous = JSON.parse(value) ?? {};
+      const tabs = Object.fromEntries(Object.entries(previous).filter(([, page]) => page && typeof page === "object").map(([botId, page]) => {
+        const tab = { id: `v1-${botId}`, url: page.url ?? "", title: page.title ?? "" };
+        return [botId, { tabs: [tab], active: tab.id }];
+      }));
+      storage.setItem(STORAGE.browsers, JSON.stringify(tabs));
+      for (const earlier of LEGACY_BROWSER_KEYS) storage.removeItem(earlier);
+      return;
+    } catch {
+    }
+  }
+};
+function migrateStorage(storage = globalThis.localStorage) {
+  for (const key of Object.values(STORAGE)) {
+    if (key === STORAGE.browsers) continue;
+    for (const legacy of legacyKeys(key)) {
+      try {
+        const value = storage.getItem(legacy);
+        if (value !== null && storage.getItem(key) === null) storage.setItem(key, value);
+        storage.removeItem(legacy);
+      } catch {
+      }
+    }
+  }
+  try {
+    migrateBrowsers(storage);
+  } catch {
+  }
+  try {
+    const prefs = JSON.parse(storage.getItem(STORAGE.prefs) ?? "null");
+    if (prefs && Object.hasOwn(LEGACY_THEMES, prefs.theme ?? "")) {
+      storage.setItem(STORAGE.prefs, JSON.stringify({ ...prefs, theme: LEGACY_THEMES[prefs.theme] }));
+    }
+  } catch {
+  }
+}
+
+// src/client/notices.js
+function readReplyNotices(storage = globalThis.localStorage) {
+  try {
+    return storage.getItem(STORAGE.replyNotices) !== "off";
+  } catch {
+    return true;
+  }
+}
+function writeReplyNotices(on, storage = globalThis.localStorage) {
+  try {
+    storage.setItem(STORAGE.replyNotices, on ? "on" : "off");
+  } catch {
+  }
+}
+var allowed = () => typeof Notification === "function" && Notification.permission === "granted";
+function snippet(text, max = 100) {
+  const plain = stripHeader(String(text ?? "")).replace(/```[^\n]*\n?/g, "").replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/^[ \t]*(?:#{1,6}|>|[-*+]|\d+[.)])[ \t]+/gm, "").replace(/(^|\s)#{1,6}\s+/g, "$1").replace(/\*\*|__|~~|`/g, "").replace(/(^|[^\w*])\*(\S(?:[^*]*?\S)?)\*(?![\w*])/g, "$1$2").replace(/(^|\W)_(\S(?:[^_]*?\S)?)_(?!\w)/g, "$1$2").replace(/\s+/g, " ").trim();
+  return plain.length > max ? `${plain.slice(0, max - 1).trimEnd()}…` : plain;
+}
+var posterOf = (bots, line) => bots.filter((bot) => line.startsWith(`${bot.name}：`)).sort((a, b) => b.name.length - a.name.length)[0];
+function noticeBots({ work, roster, sessions, polled, shownSession, openSession, repliesOn = readReplyNotices, since = Date.now() }) {
+  const lookingAt = (place) => document.visibilityState === "visible" && shownSession() === place;
+  const show = (title, body, tag, target) => {
+    const note = new Notification(title, { body, tag });
+    note.onclick = () => {
+      window.focus();
+      openSession(target);
+      note.close();
+    };
+  };
+  const nameOf = (id) => roster.getSnapshot().byId[id]?.name ?? t("A Bot");
+  const toldApprovals = /* @__PURE__ */ new Set();
+  const noticeApprovals = () => {
+    const approvals = work.getSnapshot().approvals ?? [];
+    for (const id of toldApprovals) {
+      if (!approvals.some((entry) => entry.id === id)) toldApprovals.delete(id);
+    }
+    if (!allowed()) return;
+    for (const entry of approvals) {
+      if (toldApprovals.has(entry.id)) continue;
+      toldApprovals.add(entry.id);
+      if ((entry.at ?? 0) < since || lookingAt(entry.roomId ?? entry.sessionId)) continue;
+      const room2 = entry.roomId ? roster.getSnapshot().roomsById[entry.roomId] : void 0;
+      show(
+        t("{name} is waiting for your approval", { name: nameOf(entry.botId) }),
+        [room2?.name, entry.tool].filter(Boolean).join(" · "),
+        `ds-bot-approval-${entry.id}`,
+        entry.roomId ?? entry.botId
+      );
+    }
+  };
+  const toldQuestions = /* @__PURE__ */ new Set();
+  const noticeQuestions = () => {
+    const asked = Object.entries(roster.getSnapshot().questions ?? {}).map(([sessionId, question]) => ({ sessionId, key: question.id ?? `${sessionId}:${question.askedAt}`, at: question.askedAt ?? 0 }));
+    for (const key of toldQuestions) {
+      if (!asked.some((entry) => entry.key === key)) toldQuestions.delete(key);
+    }
+    if (!allowed()) return;
+    for (const entry of asked) {
+      if (toldQuestions.has(entry.key)) continue;
+      toldQuestions.add(entry.key);
+      if (entry.at < since || lookingAt(entry.sessionId)) continue;
+      const bot = roster.getSnapshot().byId[entry.sessionId];
+      show(t("{name} asked you a question", { name: bot?.name ?? t("A Bot") }), "", `ds-bot-question-${entry.key}`, bot?.id ?? entry.sessionId);
+    }
+  };
+  const takenTurns = /* @__PURE__ */ new Map();
+  const readOutlines = /* @__PURE__ */ new Map();
+  let startParts = null;
+  let replies = [];
+  let polls = 0;
+  const takeReplies = () => {
+    const team = roster.getSnapshot();
+    if (!team.ready) return;
+    startParts ??= new Set(team.bots.map(currentPart));
+    const list = sessions.getSnapshot();
+    for (const bot of team.bots) {
+      const part = currentPart(bot);
+      const outline = list.projectionsBySession?.[part]?.values?.turnOutline ?? list.byId?.[part]?.projectionValues?.turnOutline;
+      if (!Array.isArray(outline) || readOutlines.get(part) === outline) continue;
+      readOutlines.set(part, outline);
+      const answered = outline.filter((entry) => entry.response !== "");
+      const newest = answered.at(-1)?.turn ?? -1;
+      if (!takenTurns.has(part)) takenTurns.set(part, startParts.has(part) ? newest : -1);
+      const taken = takenTurns.get(part);
+      for (const entry of answered) {
+        if (entry.turn > taken) replies.push({ part, botId: bot.id, turn: entry.turn, text: entry.response, poll: polls });
+      }
+      if (newest > taken) takenTurns.set(part, newest);
+    }
+  };
+  const noticeReplies = () => {
+    polls += 1;
+    const due = replies.filter((entry) => entry.poll < polls);
+    replies = replies.filter((entry) => entry.poll >= polls);
+    const team = roster.getSnapshot();
+    for (const entry of due) {
+      const bot = team.byId[entry.botId];
+      if (!bot || bot.hidden || isHiddenTurn(team, entry.part, entry.turn)) continue;
+      if (!repliesOn() || !allowed() || lookingAt(entry.part)) continue;
+      show(t("{name} replied", { name: bot.name }), snippet(entry.text), `ds-bot-reply-${bot.id}`, bot.id);
+    }
+  };
+  let groupLines = null;
+  const noticeGroupPosts = () => {
+    const team = roster.getSnapshot();
+    if (!team.ready) return;
+    const earlier = groupLines;
+    groupLines = new Map(team.rooms.map((room2) => [room2.id, room2.preview ?? ""]));
+    if (earlier === null) return;
+    for (const room2 of team.rooms) {
+      const line = room2.preview ?? "";
+      if (line === "" || line === earlier.get(room2.id) || room2.hidden) continue;
+      const poster = posterOf(team.bots, line);
+      if (!poster || !repliesOn() || !allowed() || lookingAt(room2.id)) continue;
+      show(t("{name} in {group}", { name: poster.name, group: room2.name }), snippet(line.slice(poster.name.length + 1)), `ds-bot-reply-${room2.id}`, room2.id);
+    }
+  };
+  const onRoster = () => {
+    noticeQuestions();
+    noticeGroupPosts();
+    takeReplies();
+  };
+  noticeApprovals();
+  onRoster();
+  const offs = [
+    work.subscribe(noticeApprovals),
+    roster.subscribe(onRoster),
+    sessions.subscribe(takeReplies),
+    polled.subscribe(noticeReplies)
+  ];
+  return () => {
+    for (const off of offs) off();
+  };
+}
+
 // src/client/settings.js
 var import_react31 = require("react");
 var capitalize2 = (word) => word[0].toUpperCase() + word.slice(1);
@@ -11542,6 +11750,7 @@ function GeneralPage({ roster, actions, run }) {
         )
       )
     ),
+    (0, import_react31.createElement)(ReplyNoticesSection, { key: "notices" }),
     actions.setSurface ? (0, import_react31.createElement)(
       SetSection,
       { key: "mode", title: t("Mode") },
@@ -11552,6 +11761,22 @@ function GeneralPage({ roster, actions, run }) {
       )
     ) : null
   ];
+}
+function ReplyNoticesSection() {
+  const [on, setOn] = (0, import_react31.useState)(readReplyNotices);
+  const change = (next) => {
+    writeReplyNotices(next);
+    setOn(next);
+  };
+  return (0, import_react31.createElement)(
+    SetSection,
+    { title: t("Notifications") },
+    (0, import_react31.createElement)(
+      SetRow,
+      { label: t("Notify me when a Bot replies"), hint: t("When this window is hidden or shows another chat, and the system allows notifications. Approvals and questions always notify.") },
+      (0, import_react31.createElement)(Switch, { on, label: t("Notify me when a Bot replies"), onChange: change })
+    )
+  );
 }
 function MainBotsSection({ roster, actions, run }) {
   const mains = (roster.mainBotIds ?? []).map((id) => roster.byId[id]).filter(Boolean);
@@ -11881,71 +12106,6 @@ function AgentMenu({ menu, roster, actions, leaving }) {
       }, (0, import_react32.createElement)(Icon), label))
     ))
   );
-}
-
-// src/client/storage.js
-var STORAGE = {
-  unread: "ds-bot:unread",
-  reactions: "ds-bot:reactions",
-  seen: "ds-bot:seen",
-  prefs: "ds-bot:prefs",
-  surface: "ds-bot:surface",
-  agentSessions: "ds-bot:agent-sessions",
-  browserWidth: "ds-bot:browser-width",
-  browsers: "ds-bot.browser.v2"
-};
-var LEGACY_PREFIXES = ["dsh-bot:", "dsh-bot-team:"];
-var LEGACY_BROWSER_KEYS = ["ds-bot.browser.v1", "dsh-bot.browser.v1"];
-var LEGACY_THEMES = { grok: "mono" };
-function legacyKeys(key) {
-  if (key === STORAGE.browsers) return LEGACY_BROWSER_KEYS;
-  const name = key.slice(key.indexOf(":") + 1);
-  return LEGACY_PREFIXES.map((prefix) => `${prefix}${name}`);
-}
-var migrateBrowsers = (storage) => {
-  if (storage.getItem(STORAGE.browsers) !== null) {
-    for (const key of LEGACY_BROWSER_KEYS) storage.removeItem(key);
-    return;
-  }
-  for (const key of LEGACY_BROWSER_KEYS) {
-    try {
-      const value = storage.getItem(key);
-      if (value === null) continue;
-      const previous = JSON.parse(value) ?? {};
-      const tabs = Object.fromEntries(Object.entries(previous).filter(([, page]) => page && typeof page === "object").map(([botId, page]) => {
-        const tab = { id: `v1-${botId}`, url: page.url ?? "", title: page.title ?? "" };
-        return [botId, { tabs: [tab], active: tab.id }];
-      }));
-      storage.setItem(STORAGE.browsers, JSON.stringify(tabs));
-      for (const earlier of LEGACY_BROWSER_KEYS) storage.removeItem(earlier);
-      return;
-    } catch {
-    }
-  }
-};
-function migrateStorage(storage = globalThis.localStorage) {
-  for (const key of Object.values(STORAGE)) {
-    if (key === STORAGE.browsers) continue;
-    for (const legacy of legacyKeys(key)) {
-      try {
-        const value = storage.getItem(legacy);
-        if (value !== null && storage.getItem(key) === null) storage.setItem(key, value);
-        storage.removeItem(legacy);
-      } catch {
-      }
-    }
-  }
-  try {
-    migrateBrowsers(storage);
-  } catch {
-  }
-  try {
-    const prefs = JSON.parse(storage.getItem(STORAGE.prefs) ?? "null");
-    if (prefs && Object.hasOwn(LEGACY_THEMES, prefs.theme ?? "")) {
-      storage.setItem(STORAGE.prefs, JSON.stringify({ ...prefs, theme: LEGACY_THEMES[prefs.theme] }));
-    }
-  } catch {
-  }
 }
 
 // src/client/member-status.js
@@ -14201,38 +14361,6 @@ var USER_MESSAGE_CSS = `
 .bt-umsg:hover .bt-utools,.bt-umsg:focus-within .bt-utools{opacity:1;visibility:visible}
 `;
 
-// src/client/approval-notices.js
-function noticeApprovals({ work, roster, shownSession, openSession, since = Date.now() }) {
-  const told = /* @__PURE__ */ new Set();
-  const notify = () => {
-    const approvals = work.getSnapshot().approvals ?? [];
-    for (const id of told) {
-      if (!approvals.some((entry) => entry.id === id)) told.delete(id);
-    }
-    if (typeof Notification !== "function" || Notification.permission !== "granted") return;
-    for (const entry of approvals) {
-      if (told.has(entry.id)) continue;
-      told.add(entry.id);
-      if ((entry.at ?? 0) < since) continue;
-      const place = entry.roomId ?? entry.sessionId;
-      if (document.visibilityState === "visible" && shownSession() === place) continue;
-      const { byId, roomsById } = roster.getSnapshot();
-      const room2 = entry.roomId ? roomsById[entry.roomId] : void 0;
-      const note = new Notification(t("{name} is waiting for your approval", { name: byId[entry.botId]?.name ?? t("A Bot") }), {
-        body: [room2?.name, entry.tool].filter(Boolean).join(" · "),
-        tag: `ds-bot-approval-${entry.id}`
-      });
-      note.onclick = () => {
-        window.focus();
-        openSession(entry.roomId ?? entry.botId);
-        note.close();
-      };
-    }
-  };
-  notify();
-  return work.subscribe(notify);
-}
-
 // src/client/index.js
 var inject = ["sessions", "uiWorkspace", "uiConversation", "slots", "theme", "layout"];
 function apply(ctx) {
@@ -14355,6 +14483,7 @@ function apply(ctx) {
       void Promise.resolve(ctx.sessions.refreshProjections?.(id)).catch(quietly("refresh projections"));
     }
   };
+  const polled = createSource(0);
   ctx.effect(() => {
     let stopped = false;
     let running = false;
@@ -14365,6 +14494,7 @@ function apply(ctx) {
       running = true;
       try {
         await pull();
+        polled.set((count) => count + 1);
       } catch (error) {
         if (!stopped) console.warn("[ds-bot] state", error);
       } finally {
@@ -14766,12 +14896,14 @@ function apply(ctx) {
   const browserPages = browsers?.pages ?? createSource({});
   const browserTabs = browsers?.tabs ?? createSource({});
   const face = () => ({ actions, hooks: { roster, ui: ui2, activity, work, memoryNews, registry, turnClock, live, cards, browserPages, browserTabs, surface, update } });
-  ctx.effect(() => noticeApprovals({
+  ctx.effect(() => noticeBots({
     work,
     roster,
+    sessions: ctx.sessions.list,
+    polled,
     shownSession: () => Object.values(ctx.sessions.list.getSnapshot().byId ?? {}).find((session) => (session?.retainedBy?.mainView ?? 0) > 0)?.id,
     openSession: (id) => actions.openSession(id)
-  }), "ds-bot: approval notifications");
+  }), "ds-bot: notifications");
   const assistantFace = (sessionId) => {
     const binding = ctx.sessions.binding(sessionId);
     if (binding === void 0) throw new Error(`ds-bot: unknown session "${sessionId}"`);

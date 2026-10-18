@@ -5,7 +5,7 @@ import { allThemes } from './themes.js'
 import { CloseIcon, ChevronLeftIcon, ChevronRightIcon, ClockIcon, ConnectorIcon, InfoIcon, PlugIcon, PlusIcon, SlidersIcon, SETTINGS_ICONS } from './icons.js'
 import { AdminStar, BotAvatar, RoomAvatar } from './mark.js'
 import { useEscape } from './overlay-hooks.js'
-import { BotSettingsForm } from './bot-settings.js'
+import { BotSettingsForm, Switch } from './bot-settings.js'
 import { Segmented, useGlide } from './motion.js'
 import { GroupSettingsForm, NewGroupForm } from './group-settings.js'
 import { CreateBot } from './create-bot.js'
@@ -17,6 +17,7 @@ import { SchedulesPage } from './schedules.js'
 import { FeedbackIcon, FeedbackPage } from './feedback.js'
 import { AboutPage } from './about.js'
 import { ProvidersPage } from './providers-page.js'
+import { readReplyNotices, writeReplyNotices } from './notices.js'
 import { t } from './i18n.js'
 
 const capitalize = word => word[0].toUpperCase() + word.slice(1)
@@ -62,10 +63,24 @@ function GeneralPage({ roster, actions, run }) {
           })),
           h('label', { className: 'bt-swatch bt-swatch-custom', title: t('Custom accent'), 'data-on': Boolean(prefs.accent) && !ACCENT_INKS.some(ink => INKS[ink][0] === prefs.accent) },
             h('input', { type: 'color', value: custom, 'aria-label': t('Custom accent'), onChange: event => pickCustom(event.target.value) }))))),
+    h(ReplyNoticesSection, { key: 'notices' }),
     actions.setSurface ? h(SetSection, { key: 'mode', title: t('Mode') },
       h(SetRow, { label: t('Classic Agent mode') },
         h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => actions.setSurface('agent') }, t('Switch')))) : null,
   ]
+}
+
+// Kept per browser, like the system permission it depends on. Approvals and questions
+// hold work up, so they notify whatever this says.
+function ReplyNoticesSection() {
+  const [on, setOn] = useState(readReplyNotices)
+  const change = (next) => {
+    writeReplyNotices(next)
+    setOn(next)
+  }
+  return h(SetSection, { title: t('Notifications') },
+    h(SetRow, { label: t('Notify me when a Bot replies'), hint: t('When this window is hidden or shows another chat, and the system allows notifications. Approvals and questions always notify.') },
+      h(Switch, { on, label: t('Notify me when a Bot replies'), onChange: change })))
 }
 
 // The first Main Bot is the sidebar tile. Picking another Bot there hands it the role
